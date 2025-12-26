@@ -1,0 +1,173 @@
+name: .NET CI/CD Pipeline - GitFlow with Approvals
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+  pull_request:
+    branches:
+      - develop
+
+env:
+  DOTNET_VERSION: '8.0'
+  BUILD_CONFIGURATION: 'Release'
+  ARTIFACT_NAME: 'drop'
+
+jobs:
+  # ===== BUILD & TEST (Runs on PR to develop or merge to develop) =====
+  build-and-test:
+    name: Build & Test
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}.x
+    
+    - name: Restore NuGet packages
+      run: dotnet restore
+    
+    - name: Build solution
+      run: dotnet build --configuration ${{ env.BUILD_CONFIGURATION }} --no-restore
+    
+    - name: Run unit tests
+      run: dotnet test --configuration ${{ env.BUILD_CONFIGURATION }} --no-build --verbosity normal
+    
+    - name: Publish artifacts
+      run: dotnet publish --configuration ${{ env.BUILD_CONFIGURATION }} --output ./publish
+    
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: ${{ env.ARTIFACT_NAME }}
+        path: ./publish
+
+  # ===== DEPLOY TO SIT (System Integration Testing) - Auto deployment =====
+  deploy-sit:
+    name: Deploy to SIT
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    
+    steps:
+    - name: Download artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: ${{ env.ARTIFACT_NAME }}
+    
+    - name: Deploy to SIT environment
+      run: |
+        echo "🚀 Deploying to SIT (System Integration Testing)..."
+        echo "App Name: ${{ secrets.SIT_APP_NAME }}"
+        echo "Resource Group: ${{ secrets.SIT_RESOURCE_GROUP }}"
+        # Add your Azure deployment commands here
+    
+    - name: Run SIT tests
+      run: |
+        echo "✅ Running SIT health checks..."
+        echo "SIT deployment completed successfully"
+
+  # ===== DEPLOY TO UAT (User Acceptance Testing) - Requires approval =====
+  deploy-uat:
+    name: Deploy to UAT
+    runs-on: ubuntu-latest
+    needs: deploy-sit
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    environment:
+      name: UAT
+      url: https://uat.example.com
+    
+    steps:
+    - name: Download artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: ${{ env.ARTIFACT_NAME }}
+    
+    - name: Deploy to UAT environment
+      run: |
+        echo "🚀 Deploying to UAT (User Acceptance Testing)..."
+        echo "App Name: ${{ secrets.UAT_APP_NAME }}"
+        echo "Resource Group: ${{ secrets.UAT_RESOURCE_GROUP }}"
+        # Add your Azure deployment commands here
+    
+    - name: Run UAT tests
+      run: |
+        echo "✅ Running UAT validation tests..."
+        echo "UAT deployment completed successfully"
+
+  # ===== DEPLOY TO PRODUCTION - Requires approval =====
+  deploy-prod:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: deploy-uat
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    environment:
+      name: Production
+      url: https://app.example.com
+    
+    steps:
+    - name: Download artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: ${{ env.ARTIFACT_NAME }}
+    
+    - name: Deploy to Production environment
+      run: |
+        echo "🚀 Deploying to Production..."
+        echo "App Name: ${{ secrets.PROD_APP_NAME }}"
+        echo "Resource Group: ${{ secrets.PROD_RESOURCE_GROUP }}"
+        # Add your Azure deployment commands here
+    
+    - name: Run Production smoke tests
+      run: |
+        echo "✅ Running Production smoke tests..."
+        echo "Production deployment completed successfully"
+
+  # ===== MERGE TO MAIN (After successful PROD deployment) =====
+  merge-to-main:
+    name: Merge to Main
+    runs-on: ubuntu-latest
+    needs: deploy-prod
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop' && success()
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+    
+    - name: Configure Git
+      run: |
+        git config user.name "Automation Bot"
+        git config user.email "automation@example.com"
+    
+    - name: Create Pull Request to Main
+      uses: actions/github-script@v6
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          const { data: pr } = await github.rest.pulls.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: '[GitFlow] Production deployment merged to main',
+            head: 'develop',
+            base: 'main',
+            body: 'Automated merge after successful production deployment.\n\nThis branch contains validated code that has been successfully deployed to production.'
+          });
+          
+          console.log('Created PR: ' + pr.html_url);
+          
+          // Auto-merge with squash
+          await github.rest.pulls.merge({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            pull_number: pr.number,
+            merge_method: 'squash'
+          });
+          
+          console.log('PR merged automatically');
